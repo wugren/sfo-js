@@ -211,6 +211,10 @@ impl JsEngine {
         })
     }
 
+    pub fn context(&mut self) -> &mut Context {
+        &mut self.context
+    }
+    
     pub fn add_module_path(&mut self, module_path: &Path) -> JSResult<()> {
         self.loader.add_module_path(module_path)
     }
