@@ -2323,7 +2323,6 @@ dependencies = [
  "clap",
  "log",
  "rustc-hash",
- "serde",
  "serde_json",
  "sfo-log",
  "sfo-result",

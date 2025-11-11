@@ -4,13 +4,12 @@ version = "0.1.0"
 edition = "2024"
 repository = "https://github.com/wugren/sfo-js.git"
 license-file = "LICENSE"
-description = ""
+description = "A wrapper to simplify the use of boa-engine"
 
 [dependencies]
 sfo-result = { version = "0.2"}
 boa_engine = { version = "0.21", features = ["embedded_lz4", "native-backtrace", "trace", "annex-b", "temporal", "jsvalue-enum", "intl_bundled", "either", "deser", "float16"] }
 boa_runtime = { version = "0.21", features = ["all"] }
-serde = "1"
 serde_json = "1"
 tokio = { version = "1", features = ["full"]}
 rustc-hash = "2"
