@@ -342,7 +342,7 @@ impl JsEngine {
         Ok(())
     }
 
-    fn call(&mut self, name: &str, args: Vec<JsValue>) -> JSResult<JsValue> {
+    pub fn call(&mut self, name: &str, args: Vec<JsValue>) -> JSResult<JsValue> {
         if self.module.is_none() {
             return Err(js_err!(JSErrorCode::JsFailed, "module didn't execute!"));
         }
