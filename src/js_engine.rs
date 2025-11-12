@@ -161,6 +161,47 @@ impl ModuleLoader for SfoModuleLoader {
     }
 }
 
+pub struct JsEngineBuilder {
+    enable_fetch: bool,
+    enable_console: bool,
+    enable_commonjs: bool,
+}
+
+impl Default for JsEngineBuilder {
+    fn default() -> Self {
+        Self {
+            enable_fetch: true,
+            enable_console: true,
+            enable_commonjs: true,
+        }
+    }
+}
+
+impl JsEngineBuilder {
+    pub fn enable_fetch(mut self, enable: bool) -> Self {
+        self.enable_fetch = enable;
+        self
+    }
+
+    pub fn enable_console(mut self, enable: bool) -> Self {
+        self.enable_console = enable;
+        self
+    }
+
+    pub fn enable_commonjs(mut self, enable: bool) -> Self {
+        self.enable_commonjs = enable;
+        self
+    }
+
+    pub fn build(self) -> JSResult<JsEngine> {
+        JsEngine::create(self)
+    }
+
+    pub async fn build_async(self) -> JSResult<AsyncJsEngine> {
+        AsyncJsEngine::create(self).await
+    }
+}
+
 pub struct JsEngine {
     loader: Rc<SfoModuleLoader>,
     context: Context,
@@ -172,6 +213,14 @@ unsafe impl Sync for JsEngine {}
 
 impl JsEngine {
     pub fn new() -> JSResult<Self> {
+        Self::create(JsEngineBuilder::default())
+    }
+
+    pub fn builder() -> JsEngineBuilder {
+        JsEngineBuilder::default()
+    }
+
+    fn create(builder: JsEngineBuilder) -> JSResult<Self> {
         let loader = Rc::new(SfoModuleLoader::new(vec![])?);
         let mut context = Context::builder()
             .module_loader(loader.clone())
@@ -179,30 +228,47 @@ impl JsEngine {
             .build()
             .map_err(|e| js_err!(JSErrorCode::JsFailed, "{e}"))?;
 
-        boa_runtime::register(
-            (
+        if builder.enable_fetch && builder.enable_console {
+            boa_runtime::register((
+                                      boa_runtime::extensions::ConsoleExtension::default(),
+                                      boa_runtime::extensions::FetchExtension(
+                                          boa_runtime::fetch::BlockingReqwestFetcher::default()
+                                      ),
+                                  ),
+                                  None,
+                                  &mut context,
+            ).map_err(|e| js_err!(JSErrorCode::JsFailed, "{e}"))?;
+        } else if builder.enable_console {
+            boa_runtime::register(
                 boa_runtime::extensions::ConsoleExtension::default(),
+                None,
+                &mut context,
+            ).map_err(|e| js_err!(JSErrorCode::JsFailed, "{e}"))?;
+        } else if builder.enable_fetch {
+            boa_runtime::register(
                 boa_runtime::extensions::FetchExtension(
                     boa_runtime::fetch::BlockingReqwestFetcher::default()
                 ),
-            ),
-            None,
-            &mut context,
-        ).map_err(|e| js_err!(JSErrorCode::JsFailed, "{e}"))?;
+                None,
+                &mut context,
+            ).map_err(|e| js_err!(JSErrorCode::JsFailed, "{e}"))?;
+        }
 
-        context.register_global_callable("require".into(), 0, NativeFunction::from_fn_ptr(require))
-            .map_err(|e| js_err!(JSErrorCode::JsFailed, "{e}"))?;
+        if builder.enable_commonjs {
+            context.register_global_callable("require".into(), 0, NativeFunction::from_fn_ptr(require))
+                .map_err(|e| js_err!(JSErrorCode::JsFailed, "{e}"))?;
 
-        // Adding custom object that mimics 'module.exports'
-        let moduleobj = JsObject::default(context.intrinsics());
-        moduleobj.set(js_string!("exports"), js_string!(" "), false, &mut context)
-            .map_err(|e| js_err!(JSErrorCode::JsFailed, "{e}"))?;
+            // Adding custom object that mimics 'module.exports'
+            let moduleobj = JsObject::default(context.intrinsics());
+            moduleobj.set(js_string!("exports"), js_string!(" "), false, &mut context)
+                .map_err(|e| js_err!(JSErrorCode::JsFailed, "{e}"))?;
 
-        context.register_global_property(
-            js_string!("module"),
-            JsValue::from(moduleobj),
-            Attribute::default(),
-        ).map_err(|e| js_err!(JSErrorCode::JsFailed, "{e}"))?;
+            context.register_global_property(
+                js_string!("module"),
+                JsValue::from(moduleobj),
+                Attribute::default(),
+            ).map_err(|e| js_err!(JSErrorCode::JsFailed, "{e}"))?;
+        }
 
         Ok(JsEngine {
             loader,
@@ -356,8 +422,8 @@ pub struct AsyncJsEngine {
 }
 
 impl AsyncJsEngine {
-    pub async fn new() -> JSResult<Self> {
-        let inner = tokio::task::spawn_blocking(|| JsEngine::new())
+    async fn create(builder: JsEngineBuilder) -> JSResult<AsyncJsEngine> {
+        let inner = tokio::task::spawn_blocking(|| JsEngine::create(builder))
             .await
             .map_err(|e| js_err!(JSErrorCode::JsFailed, "{e}"))??;
         Ok(AsyncJsEngine {

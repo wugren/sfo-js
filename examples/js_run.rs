@@ -1,5 +1,5 @@
 use std::path::Path;
-use sfo_js::AsyncJsEngine;
+use sfo_js::{JsEngine};
 
 #[tokio::main]
 async fn main() {
@@ -16,7 +16,7 @@ async fn main() {
 
     let file = matches.get_one::<String>("file").unwrap();
     let provider_path = Path::new(file.as_str());
-    let js_engine = AsyncJsEngine::new().await.unwrap();
+    let js_engine = JsEngine::builder().build_async().await.unwrap();
     if let Err(e) = js_engine.eval_file(provider_path).await {
         log::error!("Error: {}", e);
     }
