@@ -2316,9 +2316,10 @@ dependencies = [
 
 [[package]]
 name = "sfo-js"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "boa_engine",
+ "boa_macros",
  "boa_runtime",
  "clap",
  "log",
@@ -2326,6 +2327,7 @@ dependencies = [
  "serde_json",
  "sfo-log",
  "sfo-result",
+ "shlex",
  "tokio",
 ]
 

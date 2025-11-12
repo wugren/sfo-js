@@ -4,9 +4,9 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use boa_engine::{js_string, Context, JsArgs, JsError, JsNativeError, JsObject, JsResult, JsValue, Module, NativeFunction, Source};
-use boa_engine::builtins::promise::PromiseState;
 use boa_engine::class::Class;
 use boa_engine::module::{resolve_module_specifier, ModuleLoader, Referrer};
+use boa_engine::object::builtins::JsArray;
 use boa_engine::parser::source::ReadChar;
 use boa_engine::property::{Attribute, PropertyKey};
 use rustc_hash::FxHashMap;
@@ -214,7 +214,7 @@ impl JsEngine {
     pub fn context(&mut self) -> &mut Context {
         &mut self.context
     }
-    
+
     pub fn add_module_path(&mut self, module_path: &Path) -> JSResult<()> {
         self.loader.add_module_path(module_path)
     }
@@ -275,9 +275,45 @@ impl JsEngine {
         self.eval(source)
     }
 
+    pub fn eval_file_with_args(&mut self, path: &Path, args: &str) -> JSResult<()> {
+        if let Some(params) = shlex::split(args) {
+            let process_obj = JsObject::default(self.context.intrinsics());
+            let params: Vec<_> = params.iter().map(|param| {
+                JsValue::from(JsString::from(param.as_str()))
+            }).collect();
+            let params = JsArray::from_iter(params.into_iter(), &mut self.context);
+            process_obj.set(js_string!("argv"), params, false, &mut self.context)
+                .map_err(|e| js_err!(JSErrorCode::JsFailed, "{e}"))?;
+            self.context.register_global_property(
+                js_string!("process"),
+                JsValue::from(process_obj),
+                Attribute::default(),
+            ).map_err(|e| js_err!(JSErrorCode::JsFailed, "{e}"))?;
+        }
+        self.eval_file(path)
+    }
+
     pub fn eval_string(&mut self, code: &str) -> JSResult<()> {
         let source = Source::from_bytes(code.as_bytes());
         self.eval(source)
+    }
+
+    pub fn eval_string_with_args(&mut self, code: &str, args: &str) -> JSResult<()> {
+        if let Some(params) = shlex::split(args) {
+            let process_obj = JsObject::default(self.context.intrinsics());
+            let params: Vec<_> = params.iter().map(|param| {
+                JsValue::from(JsString::from(param.as_str()))
+            }).collect();
+            let params = JsArray::from_iter(params.into_iter(), &mut self.context);
+            process_obj.set(js_string!("argv"), params, false, &mut self.context)
+                .map_err(|e| js_err!(JSErrorCode::JsFailed, "{e}"))?;
+            self.context.register_global_property(
+                js_string!("process"),
+                JsValue::from(process_obj),
+                Attribute::default(),
+            ).map_err(|e| js_err!(JSErrorCode::JsFailed, "{e}"))?;
+        }
+        self.eval_string(code)
     }
 
     fn eval<'path, R: ReadChar>(&mut self, source: Source<'path, R>) -> JSResult<()> {
@@ -288,61 +324,12 @@ impl JsEngine {
         let module = Module::parse(source, None, &mut self.context)
             .map_err(|e| js_err!(JSErrorCode::JsFailed, "{e}"))?;
 
-        let promise_result = module.load(&mut self.context)
-            .then(
-                Some(
-                    NativeFunction::from_copy_closure_with_captures(
-                        |_, _, module, context| {
-                            // After loading, link all modules by resolving the imports
-                            // and exports on the full module graph, initializing module
-                            // environments. This returns a plain `Err` since all modules
-                            // must link at the same time.
-                            module.link(context)?;
-                            Ok(JsValue::undefined())
-                        },
-                        module.clone(),
-                    )
-                        .to_js_function(self.context.realm()),
-                ),
-                None,
-                &mut self.context,
-            )
-            .then(
-                Some(
-                    NativeFunction::from_copy_closure_with_captures(
-                        // Finally, evaluate the root module.
-                        // This returns a `JsPromise` since a module could have
-                        // top-level await statements, which defers module execution to the
-                        // job queue.
-                        |_, _, module, context| {
-                            let result = module.evaluate(context);
-                            Ok(result.into())
-                        },
-                        module.clone(),
-                    )
-                        .to_js_function(self.context.realm()),
-                ),
-                None,
-                &mut self.context,
-            );
+        let promise_result = module.load_link_evaluate(&mut self.context);
 
-        self.context.run_jobs()
+        let _ = promise_result.await_blocking(&mut self.context)
             .map_err(|e| js_err!(JSErrorCode::JsFailed, "{e}"))?;
 
-        match promise_result.state() {
-            PromiseState::Pending => return Err(js_err!(JSErrorCode::JsFailed, "module didn't execute!")),
-            PromiseState::Fulfilled(v) => {
-                assert_eq!(v, JsValue::undefined());
-            }
-            PromiseState::Rejected(err) => {
-                log::error!("module {:?} execution failed: {:?}", module.path(), err.to_string(&mut self.context));
-                let err = JsError::from_opaque(err).into_erased(&mut self.context);
-                return Err(js_err!(JSErrorCode::JsFailed, "{err}"));
-            }
-        }
-
         self.module = Some(module);
-
         Ok(())
     }
 
@@ -426,12 +413,32 @@ impl AsyncJsEngine {
         }).await.map_err(|e| js_err!(JSErrorCode::JsFailed, "{e}"))?
     }
 
+    pub async fn eval_string_with_args(&self, code: impl Into<String>, args: impl Into<String>) -> JSResult<()> {
+        let inner = self.inner.clone();
+        let code = code.into();
+        let params = args.into();
+        tokio::task::spawn_blocking(move || {
+            let mut inner = inner.lock().unwrap();
+            inner.eval_string_with_args(code.as_str(), params.as_str())
+        }).await.map_err(|e| js_err!(JSErrorCode::JsFailed, "{e}"))?
+    }
+
     pub async fn eval_file(&self, path: impl AsRef<Path>) -> JSResult<()> {
         let inner = self.inner.clone();
         let path = path.as_ref().to_path_buf();
         tokio::task::spawn_blocking(move || {
             let mut inner = inner.lock().unwrap();
             inner.eval_file(path.as_path())
+        }).await.map_err(|e| js_err!(JSErrorCode::JsFailed, "{e}"))?
+    }
+
+    pub async fn eval_file_with_args(&self, path: impl AsRef<Path>, args: impl Into<String>) -> JSResult<()> {
+        let inner = self.inner.clone();
+        let path = path.as_ref().to_path_buf();
+        let params = args.into();
+        tokio::task::spawn_blocking(move || {
+            let mut inner = inner.lock().unwrap();
+            inner.eval_file_with_args(path.as_path(), params.as_str())
         }).await.map_err(|e| js_err!(JSErrorCode::JsFailed, "{e}"))?
     }
 
@@ -476,61 +483,9 @@ fn require(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue
     );
 
     let module = Module::parse(Source::from_reader(wrapper_code.as_bytes(), Some(libfile.as_path())), None, ctx)?;
-    let promise_result = module.load(ctx)
-        .then(
-            Some(
-                NativeFunction::from_copy_closure_with_captures(
-                    |_, _, module, context| {
-                        // After loading, link all modules by resolving the imports
-                        // and exports on the full module graph, initializing module
-                        // environments. This returns a plain `Err` since all modules
-                        // must link at the same time.
-                        module.link(context)?;
-                        Ok(JsValue::undefined())
-                    },
-                    module.clone(),
-                )
-                    .to_js_function(ctx.realm()),
-            ),
-            None,
-            ctx,
-        )
-        .then(
-            Some(
-                NativeFunction::from_copy_closure_with_captures(
-                    // Finally, evaluate the root module.
-                    // This returns a `JsPromise` since a module could have
-                    // top-level await statements, which defers module execution to the
-                    // job queue.
-                    |_, _, module, context| Ok(module.evaluate(context).into()),
-                    module.clone(),
-                )
-                    .to_js_function(ctx.realm()),
-            ),
-            None,
-            ctx,
-        );
-    ctx.run_jobs()?;
+    let promise_result = module.load_link_evaluate(ctx);
+    promise_result.await_blocking(ctx)?;
 
-    match promise_result.state() {
-        PromiseState::Pending => return Err(JsError::from_native(JsNativeError::typ().with_message("module didn't execute!"))),
-        PromiseState::Fulfilled(v) => {
-            assert_eq!(v, JsValue::undefined());
-        }
-        PromiseState::Rejected(err) => {
-            let stacks = ctx.stack_trace();
-            for stack in stacks {
-                println!("{:?}", stack);
-            }
-
-            let err = JsError::from_opaque(err).try_native(ctx).unwrap();
-            return Err(JsError::from_native(err));
-        }
-    }
-
-    // let wrapper_func = ctx.eval(Source::from_bytes(&wrapper_code))?;
-
-    // Adding custom object that mimics 'module.exports'
     let module_obj = JsObject::default(ctx.intrinsics());
     let exports_obj = JsObject::default(ctx.intrinsics());
     module_obj.set(js_string!("exports"), exports_obj.clone(), false, ctx)?;
@@ -563,33 +518,4 @@ fn require(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue
     } else {
         unreachable!()
     }
-
-
-    // let wrapper_func = ctx.eval(Source::from_bytes(&wrapper_code))?;
-    //
-    // // Adding custom object that mimics 'module.exports'
-    // let module_obj = JsObject::default(ctx.intrinsics());
-    // let exports_obj = JsObject::default(ctx.intrinsics());
-    // exports_obj.set(js_string!("__esModule"), JsValue::new(true), false, ctx)?;
-    // module_obj.set(js_string!("exports"), exports_obj.clone(), false, ctx)?;
-    //
-    // let require = NativeFunction::from_fn_ptr(require).to_js_function(ctx.realm());
-    // let filename = libfile.to_string_lossy().to_string();
-    // let dirname = libfile.parent().unwrap().to_string_lossy().to_string();
-    //
-    // if let Some(args) = wrapper_func.as_callable() {
-    //     args.call(
-    //         &JsValue::null(),
-    //         &[
-    //             JsValue::from(exports_obj.clone()),
-    //             JsValue::from(module_obj),
-    //             JsValue::from(JsString::from(filename)),
-    //             JsValue::from(JsString::from(dirname)),
-    //         ],
-    //         ctx
-    //     )?;
-    //     Ok(JsValue::from(exports_obj))
-    // } else {
-    //     unreachable!()
-    // }
 }
